@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>USGS Terrain → Desmos + 3D Model</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#1f2937;--muted:#667085;--line:#d9e0e7;--accent:#2563eb}
+*{box-sizing:border-box}body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:var(--ink)}
+header{padding:16px 20px 11px;background:#fff;border-bottom:1px solid var(--line)}h1{margin:0 0 3px;font-size:21px}header p{margin:0;color:var(--muted);font-size:13px}
+.layout{display:grid;grid-template-columns:minmax(430px,1.05fr) minmax(440px,.95fr);gap:13px;padding:13px;height:calc(100vh - 72px)}
+.panel{background:#fff;border:1px solid var(--line);border-radius:12px;overflow:hidden;min-height:0;box-shadow:0 1px 2px rgba(0,0,0,.03)}
+.left{display:grid;grid-template-rows:auto minmax(300px,1fr) auto}.right{display:grid;grid-template-rows:auto minmax(330px,1fr) auto auto minmax(130px,.35fr)}
+.toolbar,.controls,.modelControls{padding:11px 12px;display:grid;gap:8px}.toolbar{border-bottom:1px solid var(--line)}.controls,.modelControls{border-top:1px solid var(--line)}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}input,select,button,textarea{font:inherit}input[type=text],input[type=number],select{border:1px solid #cbd5df;border-radius:8px;padding:7px 8px;background:#fff}input[type=text]{flex:1;min-width:190px}input[type=number]{width:85px}
+button{border:1px solid #c7d0da;background:#fff;border-radius:8px;padding:7px 10px;cursor:pointer}button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}button:disabled{opacity:.45;cursor:not-allowed}
+label{font-size:13px}.tiny{font-size:12px;color:var(--muted)}#map{height:100%;min-height:300px}.status{padding:9px 12px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.sectionHead{padding:10px 12px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:12px;align-items:center}.sectionHead strong{font-size:14px}.sectionHead span{font-size:12px;color:var(--muted)}#surface{width:100%;height:100%;min-height:330px}
+.sliderRow{display:grid;grid-template-columns:auto 1fr 70px;gap:8px;align-items:center}input[type=range]{width:100%}.pill{padding:3px 7px;border-radius:999px;background:#eef2f7;color:#4b5563;font-size:12px}
+.modelControls{background:#fbfcfe}.modelGrid{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:8px 14px}.modelGrid .row{justify-content:space-between}.outputWrap{min-height:0;display:grid;grid-template-rows:auto 1fr}.outputActions{padding:8px 12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}textarea{width:100%;height:100%;border:0;resize:none;padding:11px;font-family:Consolas,monospace;font-size:11.5px;line-height:1.4;outline:none}
+@media(max-width:950px){.layout{grid-template-columns:1fr;height:auto}.panel{min-height:650px}.right{min-height:850px}.modelGrid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><h1>USGS Terrain → Desmos + 3D Model</h1><p>Fetch a USGS 3DEP height field, approximate it with cosine modes, then export Desmos, OBJ, or a watertight STL terrain block.</p></header>
+<div class="layout">
+<section class="panel left">
+  <div class="toolbar">
+    <div class="row"><input id="search" type="text" placeholder="Search a mountain or place (e.g. Killington Peak, Vermont)"><button id="searchBtn">Search</button></div>
+    <div class="row"><button id="boxBtn" class="primary">Draw selection box</button><button id="clearBtn">Clear box</button><label>Grid <select id="gridSize"><option>15</option><option>21</option><option selected>31</option></select> × <span id="gridEcho">31</span></label><button id="fetchBtn" class="primary" disabled>Fetch USGS elevations</button></div>
+    <div class="tiny">Keep the selection reasonably tight around the terrain you care about. Elevation is fetched from the USGS 3DEP ImageServer in small batches.</div>
+  </div>
+  <div id="map"></div>
+  <div id="status" class="status">Search for a location, then draw a rectangle.</div>
+</section>
+<section class="panel right">
+  <div class="sectionHead"><strong>3D terrain preview</strong><span id="meta">No terrain loaded</span></div>
+  <div id="surface"></div>
+  <div class="controls">
+    <div class="sliderRow"><label for="modes">Cosine modes</label><input id="modes" type="range" min="1" max="200" value="40" disabled><input id="modeNum" type="number" min="1" max="200" value="40" disabled></div>
+    <div class="row"><button id="showOriginal" disabled>Original DEM</button><button id="showCosine" class="primary" disabled>Cosine reconstruction</button><span class="pill" id="rmse">RMSE —</span><span class="pill" id="variance">Energy —</span></div>
+  </div>
+  <div class="modelControls">
+    <strong style="font-size:13px">3D model export</strong>
+    <div class="modelGrid">
+      <div class="row"><label>Mesh source</label><select id="meshSource" disabled><option value="raw">Original USGS DEM</option><option value="cosine" selected>Current cosine reconstruction</option></select></div>
+      <div class="row"><label>Largest horizontal size</label><span><input id="modelSize" type="number" value="100" min="10" max="1000" step="5" disabled> mm</span></div>
+      <div class="row"><label>Vertical exaggeration</label><input id="verticalEx" type="number" value="1" min="0.05" max="50" step="0.25" disabled></div>
+      <div class="row"><label>STL base thickness</label><span><input id="baseThickness" type="number" value="3" min="0.2" max="100" step="0.5" disabled> mm</span></div>
+    </div>
+    <div class="row"><button id="objBtn" disabled>Export OBJ surface</button><button id="stlBtn" class="primary" disabled>Export STL solid</button><span class="tiny" id="meshInfo">True proportions at vertical exaggeration = 1.</span></div>
+  </div>
+  <div class="outputWrap">
+    <div class="outputActions"><button id="copyBtn" disabled>Copy Desmos equation</button><button id="csvBtn" disabled>Save sampled CSV</button><span class="tiny">Desmos export includes <b>s</b> as a vertical-scale slider.</span></div>
+    <textarea id="equation" readonly placeholder="Desmos equation appears here after terrain is loaded."></textarea>
+  </div>
+</section>
+</div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script>
+(()=>{
+const USGS='https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/getSamples';
+const $=id=>document.getElementById(id); const status=m=>$('status').textContent=m;
+let selection=null,grid=null,coeffs=null,currentRecon=null;
+const map=L.map('map').setView([43.6,-72.8],8);
+const topo=L.tileLayer('https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',{maxZoom:16,maxNativeZoom:16,attribution:'U.S. Geological Survey — The National Map'}).addTo(map);
+const imagery=L.tileLayer('https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}',{maxZoom:16,maxNativeZoom:16,attribution:'U.S. Geological Survey — The National Map'});
+L.control.layers({'USGS Topo':topo,'USGS Imagery + Topo':imagery}).addTo(map);
+const drawn=new L.FeatureGroup().addTo(map);
+const drawControl=new L.Control.Draw({draw:{polygon:false,polyline:false,circle:false,marker:false,circlemarker:false,rectangle:{shapeOptions:{color:'#2563eb',weight:2,fillOpacity:.08}}},edit:false});map.addControl(drawControl);
+map.on(L.Draw.Event.CREATED,e=>{drawn.clearLayers();selection=e.layer;drawn.addLayer(selection);$('fetchBtn').disabled=false;describeBox()});
+$('boxBtn').onclick=()=>new L.Draw.Rectangle(map,drawControl.options.draw.rectangle).enable();
+$('clearBtn').onclick=()=>{drawn.clearLayers();selection=null;$('fetchBtn').disabled=true;status('Selection cleared.')};
+$('gridSize').onchange=()=>$('gridEcho').textContent=$('gridSize').value;
+function hav(lat1,lon1,lat2,lon2){const R=6371,d=Math.PI/180,da=(lat2-lat1)*d,do_=(lon2-lon1)*d,a=Math.sin(da/2)**2+Math.cos(lat1*d)*Math.cos(lat2*d)*Math.sin(do_/2)**2;return 2*R*Math.asin(Math.sqrt(a))}
+function describeBox(){if(!selection)return;const b=selection.getBounds(),c=b.getCenter(),w=hav(c.lat,b.getWest(),c.lat,b.getEast()),h=hav(b.getSouth(),c.lng,b.getNorth(),c.lng);status(`Selected ${w.toFixed(2)} km × ${h.toFixed(2)} km.`)}
+async function geocode(){const q=$('search').value.trim();if(!q)return;status('Searching…');try{const u='https://nominatim.openstreetmap.org/search?format=json&limit=1&q='+encodeURIComponent(q);const r=await fetch(u);const d=await r.json();if(!d.length)throw Error('No matching place found');const h=d[0];map.setView([+h.lat,+h.lon],13);L.popup().setLatLng([+h.lat,+h.lon]).setContent(h.display_name).openOn(map);status('Found '+h.display_name+'. Draw a selection box.')}catch(e){status('Search error: '+e.message)}}
+$('searchBtn').onclick=geocode;$('search').addEventListener('keydown',e=>{if(e.key==='Enter')geocode()});
+function fillMissing(a,n){for(let pass=0;pass<6;pass++){let change=0;for(let j=0;j<n;j++)for(let i=0;i<n;i++){const k=j*n+i;if(Number.isFinite(a[k]))continue;let s=0,c=0;for(const [di,dj] of [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,-1],[1,-1],[-1,1]]){const ii=i+di,jj=j+dj;if(ii>=0&&ii<n&&jj>=0&&jj<n&&Number.isFinite(a[jj*n+ii])){s+=a[jj*n+ii];c++}}if(c){a[k]=s/c;change++}}if(!change)break}const finite=a.filter(Number.isFinite),mean=finite.reduce((s,v)=>s+v,0)/finite.length;for(let k=0;k<a.length;k++)if(!Number.isFinite(a[k]))a[k]=mean}
+$('fetchBtn').onclick=async()=>{if(!selection)return;const n=+$('gridSize').value,b=selection.getBounds(),pts=[];for(let j=0;j<n;j++){const lat=b.getSouth()+(b.getNorth()-b.getSouth())*j/(n-1);for(let i=0;i<n;i++){const lon=b.getWest()+(b.getEast()-b.getWest())*i/(n-1);pts.push([lon,lat])}}$('fetchBtn').disabled=true;const vals=new Array(pts.length).fill(NaN);try{const BS=75;for(let start=0;start<pts.length;start+=BS){const batch=pts.slice(start,start+BS),geom={points:batch,spatialReference:{wkid:4326}},params=new URLSearchParams({geometryType:'esriGeometryMultipoint',geometry:JSON.stringify(geom),returnFirstValueOnly:'true',interpolation:'RSP_BilinearInterpolation',f:'json'});status(`Fetching elevations… ${start}/${pts.length}`);const r=await fetch(USGS+'?'+params.toString(),{mode:'cors'});if(!r.ok)throw Error('USGS request failed ('+r.status+')');const d=await r.json();if(d.error)throw Error(d.error.message||'USGS service error');(d.samples||[]).forEach((s,idx)=>{const v=parseFloat(String(s.value??'').split(',')[0]);if(Number.isFinite(v)&&idx<batch.length)vals[start+idx]=v})}fillMissing(vals,n);const z=[];for(let j=0;j<n;j++)z.push(vals.slice(j*n,(j+1)*n));const c=b.getCenter(),W=hav(c.lat,b.getWest(),c.lat,b.getEast()),H=hav(b.getSouth(),c.lng,b.getNorth(),c.lng),xs=Array.from({length:n},(_,i)=>W*i/(n-1)),ys=Array.from({length:n},(_,j)=>H*j/(n-1));grid={n,z,xs,ys,width:W,height:H,bounds:b,points:pts};status('Computing cosine coefficients…');coeffs=computeDCT2(z);enable();updateCosine();status('Done. You can now export Desmos, OBJ, or STL.')}catch(e){status('Could not load terrain: '+e.message)}finally{$('fetchBtn').disabled=false}};
+function dct1(v){const n=v.length,o=new Array(n).fill(0),D=n-1;for(let k=0;k<n;k++){let s=v[0]+((k%2===0)?v[n-1]:-v[n-1]);for(let i=1;i<n-1;i++)s+=2*v[i]*Math.cos(Math.PI*k*i/D);o[k]=s}return o}
+function computeDCT2(z){const n=z.length,D=(n-1)*(n-1),rt=Array.from({length:n},()=>Array(n));for(let y=0;y<n;y++)rt[y]=dct1(z[y]);const full=Array.from({length:n},()=>Array(n).fill(0));for(let kx=0;kx<n;kx++){const col=Array.from({length:n},(_,y)=>rt[y][kx]),ct=dct1(col);for(let ky=0;ky<n;ky++)full[ky][kx]=ct[ky]}const L=[];for(let ky=0;ky<n;ky++)for(let kx=0;kx<n;kx++){let c=full[ky][kx]/D;if(kx===0||kx===n-1)c/=2;if(ky===0||ky===n-1)c/=2;L.push({kx,ky,coeff:c,score:(kx===0&&ky===0)?Infinity:Math.abs(c)})}L.sort((a,b)=>b.score-a.score);return L}
+function reconstruct(k){const n=grid.n,D=n-1,sel=coeffs.slice(0,k+1),r=Array.from({length:n},()=>Array(n).fill(0));for(let y=0;y<n;y++)for(let x=0;x<n;x++){let v=0;for(const c of sel)v+=c.coeff*Math.cos(Math.PI*c.kx*x/D)*Math.cos(Math.PI*c.ky*y/D);r[y][x]=v}let sse=0,sum=0;for(let y=0;y<n;y++)for(let x=0;x<n;x++)sum+=grid.z[y][x];const mean=sum/(n*n);let sst=0;for(let y=0;y<n;y++)for(let x=0;x<n;x++){sse+=(r[y][x]-grid.z[y][x])**2;sst+=(grid.z[y][x]-mean)**2}return{r,rmse:Math.sqrt(sse/(n*n)),energy:Math.max(0,1-sse/(sst||1))}}
+function enable(){const ids=['modes','modeNum','showOriginal','showCosine','copyBtn','csvBtn','meshSource','modelSize','verticalEx','baseThickness','objBtn','stlBtn'];ids.forEach(id=>$(id).disabled=false);const m=Math.min(300,coeffs.length-1);$('modes').max=m;$('modeNum').max=m;if(+$('modes').value>m){$('modes').value=m;$('modeNum').value=m}$('meta').textContent=`${grid.n}×${grid.n} • ${grid.width.toFixed(2)} × ${grid.height.toFixed(2)} km`}
+function plot(z,title){Plotly.react('surface',[{type:'surface',x:grid.xs,y:grid.ys,z,colorscale:'Earth',showscale:false}],{margin:{l:0,r:0,t:28,b:0},title:{text:title,font:{size:13}},scene:{xaxis:{title:'x km'},yaxis:{title:'y km'},zaxis:{title:'elev m'},aspectmode:'manual',aspectratio:{x:1,y:grid.height/grid.width,z:.45}}},{responsive:true,displaylogo:false})}
+function updateCosine(){if(!grid)return;const k=Math.max(1,Math.min(+$('modes').value,coeffs.length-1));$('modes').value=k;$('modeNum').value=k;const q=reconstruct(k);currentRecon=q.r;plot(q.r,`Cosine reconstruction — ${k} modes`);$('rmse').textContent=`RMSE ${q.rmse.toFixed(1)} m`;$('variance').textContent=`Energy ${(100*q.energy).toFixed(1)}%`;$('equation').value=desmos(k);updateMeshInfo()}
+$('modes').oninput=()=>{$('modeNum').value=$('modes').value;updateCosine()};$('modeNum').onchange=()=>{$('modes').value=$('modeNum').value;updateCosine()};$('showOriginal').onclick=()=>plot(grid.z,'Original USGS terrain');$('showCosine').onclick=updateCosine;
+function fmt(v,d=7){return Number(v.toFixed(d)).toString()}
+function desmos(k){const sel=coeffs.slice(0,k+1),approx=reconstruct(k).r;let mn=Infinity,mx=-Infinity;for(const row of approx)for(const v of row){mn=Math.min(mn,v);mx=Math.max(mx,v)}const relief=(mx-mn)/1000,L=Math.max(grid.width,grid.height,relief),sc=10/L,xh=grid.width*sc/2,yh=grid.height*sc/2,parts=[];for(const c of sel){const amp=(c.coeff/1000)*sc;if(Math.abs(amp)<1e-10)continue;let b=[];if(c.kx){const a=(Math.PI*c.kx/grid.width)/sc,p=(Math.PI*c.kx/2)%(2*Math.PI);b.push(`\\cos\\left(${fmt(a)}x${p?` + ${fmt(p)}`:''}\\right)`)}if(c.ky){const a=(Math.PI*c.ky/grid.height)/sc,p=(Math.PI*c.ky/2)%(2*Math.PI);b.push(`\\cos\\left(${fmt(a)}y${p?` + ${fmt(p)}`:''}\\right)`)}const sign=amp>=0?'+':'-',mag=fmt(Math.abs(amp),8);parts.push(`${sign} ${mag}${b.length?'*'+b.join('*'):''}`)}let e=parts.join(' ').replace(/^\+\s*/,'');e+=` - ${fmt((mn/1000)*sc,8)}`;return `z=s\\left(${e}\\right)\\left\\{-${fmt(xh,4)}\\le x\\le ${fmt(xh,4)}\\right\\}\\left\\{-${fmt(yh,4)}\\le y\\le ${fmt(yh,4)}\\right\\}`}
+function meshZ(){return $('meshSource').value==='raw'?grid.z:(currentRecon||reconstruct(+$('modes').value).r)}
+function meshGeometry(){const z=meshZ(),n=grid.n,size=Math.max(10,+$('modelSize').value||100),ex=Math.max(.01,+$('verticalEx').value||1),hscale=size/Math.max(grid.width,grid.height);let mn=Infinity,mx=-Infinity;for(const row of z)for(const v of row){mn=Math.min(mn,v);mx=Math.max(mx,v)}const verts=[];for(let j=0;j<n;j++)for(let i=0;i<n;i++){const x=(grid.xs[i]-grid.width/2)*hscale,y=(grid.ys[j]-grid.height/2)*hscale,zz=((z[j][i]-mn)/1000)*hscale*ex;verts.push([x,y,zz])}const faces=[];for(let j=0;j<n-1;j++)for(let i=0;i<n-1;i++){const a=j*n+i,b=a+1,c=a+n,d=c+1;faces.push([a,b,d],[a,d,c])}return{verts,faces,mn,mx,size,hscale,ex,n}}
+function updateMeshInfo(){if(!grid)return;const g=meshGeometry(),rel=((g.mx-g.mn)/1000)*g.hscale*g.ex;$('meshInfo').textContent=`Mesh ≈ ${grid.width*g.hscale.toFixed?'' : ''}${(grid.width*g.hscale).toFixed(1)} × ${(grid.height*g.hscale).toFixed(1)} × ${rel.toFixed(1)} mm; ${g.n}×${g.n} vertices.`}
+['meshSource','modelSize','verticalEx','baseThickness'].forEach(id=>$(id).addEventListener('change',updateMeshInfo));
+function saveBlob(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1200)}
+$('objBtn').onclick=()=>{const g=meshGeometry();let out='# USGS terrain OBJ\n# Units: millimeters\n';for(const v of g.verts)out+=`v ${v[0].toFixed(6)} ${v[1].toFixed(6)} ${v[2].toFixed(6)}\n`;for(const f of g.faces)out+=`f ${f[0]+1} ${f[1]+1} ${f[2]+1}\n`;saveBlob(new Blob([out],{type:'text/plain'}),'usgs_terrain.obj')};
+function normal(a,b,c){const ux=b[0]-a[0],uy=b[1]-a[1],uz=b[2]-a[2],vx=c[0]-a[0],vy=c[1]-a[1],vz=c[2]-a[2],nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx,L=Math.hypot(nx,ny,nz)||1;return[nx/L,ny/L,nz/L]}
+function triSTL(a,b,c){const n=normal(a,b,c);return` facet normal ${n[0]} ${n[1]} ${n[2]}\n  outer loop\n   vertex ${a[0]} ${a[1]} ${a[2]}\n   vertex ${b[0]} ${b[1]} ${b[2]}\n   vertex ${c[0]} ${c[1]} ${c[2]}\n  endloop\n endfacet\n`}
+$('stlBtn').onclick=()=>{const g=meshGeometry(),n=g.n,bt=Math.max(.01,+$('baseThickness').value||3),top=g.verts,baseZ=-bt;let stl='solid usgs_terrain\n';for(const f of g.faces)stl+=triSTL(top[f[0]],top[f[1]],top[f[2]]);
+// bottom
+const bl=[top[0][0],top[0][1],baseZ],br=[top[n-1][0],top[n-1][1],baseZ],tl=[top[(n-1)*n][0],top[(n-1)*n][1],baseZ],tr=[top[n*n-1][0],top[n*n-1][1],baseZ];stl+=triSTL(bl,tr,br)+triSTL(bl,tl,tr);
+// side walls around perimeter, each edge as a quad -> 2 triangles
+const edge=[];for(let i=0;i<n;i++)edge.push(i);for(let j=1;j<n;j++)edge.push(j*n+n-1);for(let i=n-2;i>=0;i--)edge.push((n-1)*n+i);for(let j=n-2;j>=1;j--)edge.push(j*n);for(let q=0;q<edge.length;q++){const ia=edge[q],ib=edge[(q+1)%edge.length],a=top[ia],b=top[ib],ab=[a[0],a[1],baseZ],bb=[b[0],b[1],baseZ];stl+=triSTL(a,b,bb)+triSTL(a,bb,ab)}stl+='endsolid usgs_terrain\n';saveBlob(new Blob([stl],{type:'model/stl'}),'usgs_terrain_solid.stl')};
+$('copyBtn').onclick=async()=>{try{await navigator.clipboard.writeText($('equation').value);$('copyBtn').textContent='Copied!';setTimeout(()=>$('copyBtn').textContent='Copy Desmos equation',1000)}catch(e){$('equation').select();document.execCommand('copy')}};
+$('csvBtn').onclick=()=>{let c='x_km,y_km,longitude,latitude,elevation_m\n';for(let j=0;j<grid.n;j++)for(let i=0;i<grid.n;i++){const k=j*grid.n+i,p=grid.points[k];c+=`${grid.xs[i]},${grid.ys[j]},${p[0]},${p[1]},${grid.z[j][i]}\n`}saveBlob(new Blob([c],{type:'text/csv'}),'usgs_terrain_samples.csv')};
+Plotly.newPlot('surface',[],{margin:{l:0,r:0,t:0,b:0},annotations:[{text:'Select terrain on the map to begin',showarrow:false,x:.5,y:.5,xref:'paper',yref:'paper'}]},{responsive:true,displaylogo:false});
+})();
+</script>
+</body>
+</html>
